@@ -1,0 +1,8 @@
+{
+    "name": "cocos-mcp-server-2x",
+    "version": "0.1.0",
+    "description": "MCP Server for Cocos Creator 2.x",
+    "author": "LiDaxian",
+    "main": "./main.js",
+    "scene-script": "./scene-script.js"
+}
