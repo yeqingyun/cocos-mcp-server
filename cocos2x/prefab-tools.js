@@ -26,6 +26,20 @@ PrefabTools.prototype.getTools = function() {
             }
         },
         {
+            name: 'load_prefab',
+            description: 'Load a prefab asset into memory',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    prefabUuid: {
+                        type: 'string',
+                        description: 'Prefab asset UUID'
+                    }
+                },
+                required: ['prefabUuid']
+            }
+        },
+        {
             name: 'instantiate_prefab',
             description: 'Instantiate a prefab in the scene',
             inputSchema: {
@@ -52,6 +66,60 @@ PrefabTools.prototype.getTools = function() {
             }
         },
         {
+            name: 'create_prefab',
+            description: 'Create a prefab from a node in the scene',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    nodeUuid: {
+                        type: 'string',
+                        description: 'Source node UUID'
+                    },
+                    prefabPath: {
+                        type: 'string',
+                        description: 'Path to save the prefab (e.g. db://assets/prefabs/MyPrefab.prefab)'
+                    },
+                    prefabName: {
+                        type: 'string',
+                        description: 'Prefab name (defaults to node name)'
+                    }
+                },
+                required: ['nodeUuid', 'prefabPath']
+            }
+        },
+        {
+            name: 'update_prefab',
+            description: 'Update an existing prefab from a scene node',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    nodeUuid: {
+                        type: 'string',
+                        description: 'Node UUID with changes to apply to prefab'
+                    },
+                    prefabUuid: {
+                        type: 'string',
+                        description: 'Prefab asset UUID to update'
+                    }
+                },
+                required: ['nodeUuid', 'prefabUuid']
+            }
+        },
+        {
+            name: 'revert_prefab',
+            description: 'Revert a prefab instance to its original prefab state',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    nodeUuid: {
+                        type: 'string',
+                        description: 'Prefab instance node UUID'
+                    }
+                },
+                required: ['nodeUuid']
+            }
+        },
+        {
             name: 'get_prefab_info',
             description: 'Get prefab asset information',
             inputSchema: {
@@ -64,6 +132,56 @@ PrefabTools.prototype.getTools = function() {
                 },
                 required: ['prefabUuid']
             }
+        },
+        {
+            name: 'validate_prefab',
+            description: 'Validate a prefab file format',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    prefabUuid: {
+                        type: 'string',
+                        description: 'Prefab asset UUID'
+                    }
+                },
+                required: ['prefabUuid']
+            }
+        },
+        {
+            name: 'duplicate_prefab',
+            description: 'Duplicate an existing prefab',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    sourcePrefabUuid: {
+                        type: 'string',
+                        description: 'Source prefab UUID'
+                    },
+                    targetPrefabPath: {
+                        type: 'string',
+                        description: 'Target prefab path (e.g. db://assets/prefabs/Copy.prefab)'
+                    }
+                },
+                required: ['sourcePrefabUuid', 'targetPrefabPath']
+            }
+        },
+        {
+            name: 'restore_prefab_node',
+            description: 'Restore a prefab node using prefab asset (built-in undo record)',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    nodeUuid: {
+                        type: 'string',
+                        description: 'Prefab instance node UUID'
+                    },
+                    assetUuid: {
+                        type: 'string',
+                        description: 'Prefab asset UUID'
+                    }
+                },
+                required: ['nodeUuid', 'assetUuid']
+            }
         }
     ];
 };
@@ -72,10 +190,24 @@ PrefabTools.prototype.execute = function(toolName, args) {
     switch (toolName) {
         case 'get_prefab_list':
             return this.getPrefabList(args.folder);
+        case 'load_prefab':
+            return this.loadPrefab(args.prefabUuid);
         case 'instantiate_prefab':
             return this.instantiatePrefab(args);
+        case 'create_prefab':
+            return this.createPrefab(args);
+        case 'update_prefab':
+            return this.updatePrefab(args);
+        case 'revert_prefab':
+            return this.revertPrefab(args.nodeUuid);
         case 'get_prefab_info':
             return this.getPrefabInfo(args.prefabUuid);
+        case 'validate_prefab':
+            return this.validatePrefab(args.prefabUuid);
+        case 'duplicate_prefab':
+            return this.duplicatePrefab(args);
+        case 'restore_prefab_node':
+            return this.restorePrefabNode(args.nodeUuid, args.assetUuid);
         default:
             return Promise.reject(new Error('Unknown prefab tool: ' + toolName));
     }
@@ -128,7 +260,7 @@ PrefabTools.prototype.instantiatePrefab = function(args) {
 
 PrefabTools.prototype.getPrefabInfo = function(prefabUuid) {
     return new Promise(function(resolve) {
-        if (Editor.assetdb.queryInfoByUuid) {
+        if (typeof Editor.assetdb.queryInfoByUuid === 'function') {
             Editor.assetdb.queryInfoByUuid(prefabUuid, function(err, info) {
                 if (err || !info) {
                     resolve({ success: false, error: err ? err.message || String(err) : 'Prefab not found' });
@@ -145,7 +277,7 @@ PrefabTools.prototype.getPrefabInfo = function(prefabUuid) {
                     }
                 });
             });
-        } else if (Editor.assetdb.assetInfoByUuid) {
+        } else if (typeof Editor.assetdb.assetInfoByUuid === 'function') {
             try {
                 var info = Editor.assetdb.assetInfoByUuid(prefabUuid);
                 if (!info) {
@@ -169,6 +301,282 @@ PrefabTools.prototype.getPrefabInfo = function(prefabUuid) {
             resolve({ success: false, error: 'No asset info API available' });
         }
     });
+};
+
+PrefabTools.prototype.loadPrefab = function(prefabUuid) {
+    return callSceneScript('load-prefab', prefabUuid);
+};
+
+PrefabTools.prototype.createPrefab = function(args) {
+    var self = this;
+    return new Promise(function(resolve) {
+        // First, get the node data from scene
+        callSceneScript('get-node-serialize-data', args.nodeUuid).then(function(result) {
+            if (!result.success) {
+                resolve(result);
+                return;
+            }
+
+            var prefabName = args.prefabName || 'NewPrefab';
+            var prefabData = result.data;
+
+            // Create the prefab file using assetdb
+            Editor.assetdb.create(args.prefabPath, prefabData, function(err, uuid) {
+                if (err) {
+                    resolve({ success: false, error: err.message || String(err) });
+                    return;
+                }
+
+                resolve({
+                    success: true,
+                    data: {
+                        uuid: uuid,
+                        path: args.prefabPath,
+                        name: prefabName,
+                        message: 'Prefab created successfully'
+                    }
+                });
+            });
+        }).catch(function(err) {
+            resolve({ success: false, error: err.message || String(err) });
+        });
+    });
+};
+
+PrefabTools.prototype.updatePrefab = function(args) {
+    var self = this;
+    return new Promise(function(resolve) {
+        // Get the node data from scene
+        callSceneScript('get-node-serialize-data', args.nodeUuid).then(function(result) {
+            if (!result.success) {
+                resolve(result);
+                return;
+            }
+
+            var prefabData = result.data;
+
+            // First get the prefab path from UUID
+            var prefabPath = null;
+            if (typeof Editor.assetdb.queryInfoByUuid === 'function') {
+                Editor.assetdb.queryInfoByUuid(args.prefabUuid, function(err, info) {
+                    if (err || !info) {
+                        resolve({ success: false, error: 'Prefab not found' });
+                        return;
+                    }
+                    prefabPath = info.url;
+                    doUpdate();
+                });
+            } else if (typeof Editor.assetdb.assetInfoByUuid === 'function') {
+                try {
+                    var info = Editor.assetdb.assetInfoByUuid(args.prefabUuid);
+                    if (!info) {
+                        resolve({ success: false, error: 'Prefab not found' });
+                        return;
+                    }
+                    prefabPath = info.url;
+                    doUpdate();
+                } catch (e) {
+                    resolve({ success: false, error: e.message });
+                }
+            } else {
+                resolve({ success: false, error: 'No asset info API available' });
+                return;
+            }
+
+            function doUpdate() {
+                if (!prefabPath) {
+                    resolve({ success: false, error: 'Could not resolve prefab path' });
+                    return;
+                }
+
+                // Write the updated prefab data directly to file
+                var fs = require('fs');
+                var realPath = Editor.assetdb._fspath(prefabPath);
+
+                try {
+                    // Convert prefabData to JSON string if it's an object
+                    var contentToWrite = typeof prefabData === 'string' ? prefabData : JSON.stringify(prefabData);
+
+                    // Write the prefab file
+                    fs.writeFileSync(realPath, contentToWrite, 'utf8');
+
+                    resolve({
+                        success: true,
+                        message: 'Prefab updated successfully (changes will be detected by editor)'
+                    });
+                } catch (e) {
+                    resolve({ success: false, error: 'Failed to write prefab file: ' + e.message });
+                }
+            }
+        }).catch(function(err) {
+            resolve({ success: false, error: err.message || String(err) });
+        });
+    });
+};
+
+PrefabTools.prototype.revertPrefab = function(nodeUuid) {
+    return callSceneScript('revert-prefab', nodeUuid);
+};
+
+PrefabTools.prototype.validatePrefab = function(prefabUuid) {
+    return new Promise(function(resolve) {
+        // First get the prefab path
+        var prefabPath = null;
+        if (typeof Editor.assetdb.queryInfoByUuid === 'function') {
+            Editor.assetdb.queryInfoByUuid(prefabUuid, function(err, info) {
+                if (err || !info) {
+                    resolve({ success: false, error: 'Prefab not found' });
+                    return;
+                }
+                prefabPath = info.url;
+                doValidate();
+            });
+        } else if (typeof Editor.assetdb.assetInfoByUuid === 'function') {
+            try {
+                var info = Editor.assetdb.assetInfoByUuid(prefabUuid);
+                if (!info) {
+                    resolve({ success: false, error: 'Prefab not found' });
+                    return;
+                }
+                prefabPath = info.url;
+                doValidate();
+            } catch (e) {
+                resolve({ success: false, error: e.message });
+            }
+        } else {
+            resolve({ success: false, error: 'No asset info API available' });
+            return;
+        }
+
+        function doValidate() {
+            if (!prefabPath) {
+                resolve({ success: false, error: 'Could not resolve prefab path' });
+                return;
+            }
+
+            // Try to read and parse the prefab file
+            var fs = require('fs');
+            var realPath = Editor.assetdb._fspath(prefabPath);
+
+            try {
+                var content = fs.readFileSync(realPath, 'utf8');
+                var prefabData = JSON.parse(content);
+
+                // Basic validation
+                var isValid = Array.isArray(prefabData) && prefabData.length > 0;
+                var issues = [];
+                var nodeCount = 0;
+                var componentCount = 0;
+
+                if (isValid) {
+                    // Check for cc.Prefab type in first element
+                    if (prefabData[0].__type__ !== 'cc.Prefab') {
+                        issues.push('First element must be cc.Prefab type');
+                    }
+
+                    // Count nodes and components
+                    for (var i = 0; i < prefabData.length; i++) {
+                        var item = prefabData[i];
+                        if (item.__type__ === 'cc.Node') {
+                            nodeCount++;
+                        } else if (item.__type__ && item.__type__.indexOf('cc.') === 0) {
+                            componentCount++;
+                        }
+                    }
+
+                    if (nodeCount === 0) {
+                        issues.push('Prefab must contain at least one node');
+                        isValid = false;
+                    }
+                } else {
+                    issues.push('Prefab data must be an array');
+                }
+
+                resolve({
+                    success: true,
+                    data: {
+                        isValid: isValid,
+                        issues: issues,
+                        nodeCount: nodeCount,
+                        componentCount: componentCount,
+                        message: isValid ? 'Prefab format is valid' : 'Prefab format has issues'
+                    }
+                });
+            } catch (e) {
+                resolve({ success: false, error: 'Failed to read prefab file: ' + e.message });
+            }
+        }
+    });
+};
+
+PrefabTools.prototype.duplicatePrefab = function(args) {
+    return new Promise(function(resolve) {
+        // First get the source prefab path
+        var sourcePath = null;
+        if (typeof Editor.assetdb.queryInfoByUuid === 'function') {
+            Editor.assetdb.queryInfoByUuid(args.sourcePrefabUuid, function(err, info) {
+                if (err || !info) {
+                    resolve({ success: false, error: 'Source prefab not found' });
+                    return;
+                }
+                sourcePath = info.url;
+                doDuplicate();
+            });
+        } else if (typeof Editor.assetdb.assetInfoByUuid === 'function') {
+            try {
+                var info = Editor.assetdb.assetInfoByUuid(args.sourcePrefabUuid);
+                if (!info) {
+                    resolve({ success: false, error: 'Source prefab not found' });
+                    return;
+                }
+                sourcePath = info.url;
+                doDuplicate();
+            } catch (e) {
+                resolve({ success: false, error: e.message });
+            }
+        } else {
+            resolve({ success: false, error: 'No asset info API available' });
+            return;
+        }
+
+        function doDuplicate() {
+            if (!sourcePath) {
+                resolve({ success: false, error: 'Could not resolve source prefab path' });
+                return;
+            }
+
+            // Read the source prefab
+            var fs = require('fs');
+            var realPath = Editor.assetdb._fspath(sourcePath);
+
+            try {
+                var content = fs.readFileSync(realPath, 'utf8');
+
+                // Create the new prefab with the same content
+                Editor.assetdb.create(args.targetPrefabPath, content, function(err, uuid) {
+                    if (err) {
+                        resolve({ success: false, error: err.message || String(err) });
+                        return;
+                    }
+
+                    resolve({
+                        success: true,
+                        data: {
+                            uuid: uuid,
+                            path: args.targetPrefabPath,
+                            message: 'Prefab duplicated successfully'
+                        }
+                    });
+                });
+            } catch (e) {
+                resolve({ success: false, error: 'Failed to duplicate prefab: ' + e.message });
+            }
+        }
+    });
+};
+
+PrefabTools.prototype.restorePrefabNode = function(nodeUuid, assetUuid) {
+    return callSceneScript('restore-prefab-node', nodeUuid, assetUuid);
 };
 
 exports.PrefabTools = PrefabTools;

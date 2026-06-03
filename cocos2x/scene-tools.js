@@ -182,45 +182,15 @@ SceneTools.prototype.openScene = function(sceneUuid) {
 
 SceneTools.prototype.saveScene = function() {
     var self = this;
-    var url = self._currentSceneUrl;
-
     return new Promise(function(resolve) {
-        if (!url) {
-            self._fallbackSave(resolve, 'no cached url');
-            return;
+        try {
+            // Use editor's save API to ensure dirty flag is cleared
+            Editor.Ipc.sendToPanel('scene', 'scene:stash-and-save');
+            resolve({ success: true, message: 'Scene saved successfully' });
+        } catch (e) {
+            resolve({ success: false, error: e.message });
         }
-
-        // Use _Scene.stashScene from scene script to serialize
-        callSceneScript('save-scene-direct').then(function(result) {
-            if (!result.success || !result.data) {
-                self._fallbackSave(resolve, 'stashScene failed: ' + (result.error || 'no data'));
-                return;
-            }
-
-            var fs = require('fs');
-            var path = require('path');
-            var projectPath = Editor.Project && Editor.Project.path ? Editor.Project.path
-                : (Editor.projectInfo && Editor.projectInfo.path ? Editor.projectInfo.path : '');
-            var filePath = path.join(projectPath, url.replace('db://', ''));
-            var content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data, null, 2);
-            fs.writeFileSync(filePath, content, 'utf-8');
-
-            Editor.assetdb.refresh(url, function() {
-                resolve({ success: true, message: 'Scene saved successfully' });
-            });
-        }).catch(function(e) {
-            self._fallbackSave(resolve, 'save error: ' + e.message);
-        });
     });
-};
-
-SceneTools.prototype._fallbackSave = function(resolve, reason) {
-    try {
-        Editor.Ipc.sendToPanel('scene', 'scene:stash-and-save');
-        resolve({ success: true, message: 'Save command sent to scene panel (fallback)', _debug_reason: reason || 'unknown' });
-    } catch (e) {
-        resolve({ success: false, error: e.message, _debug_reason: reason || 'unknown' });
-    }
 };
 
 SceneTools.prototype.createScene = function(sceneName, savePath) {

@@ -19,7 +19,7 @@ ProjectTools.prototype.getTools = function() {
         },
         {
             name: 'get_assets',
-            description: 'Get assets by type',
+            description: 'Get assets by type with pagination support, optional path filtering',
             inputSchema: {
                 type: 'object',
                 properties: {
@@ -28,6 +28,25 @@ ProjectTools.prototype.getTools = function() {
                         description: 'Asset type filter',
                         enum: ['all', 'scene', 'prefab', 'script', 'texture', 'audio', 'animation'],
                         default: 'all'
+                    },
+                    path: {
+                        type: 'string',
+                        description: 'Filter by path pattern (e.g. "db://assets/res/hall/**/*.png")'
+                    },
+                    limit: {
+                        type: 'number',
+                        description: 'Maximum number of assets to return (default: 100, max: 1000)',
+                        default: 100
+                    },
+                    offset: {
+                        type: 'number',
+                        description: 'Number of assets to skip (for pagination, default: 0)',
+                        default: 0
+                    },
+                    countOnly: {
+                        type: 'boolean',
+                        description: 'Return only the count without asset list (much faster)',
+                        default: false
                     }
                 }
             }
@@ -113,7 +132,7 @@ ProjectTools.prototype.execute = function(toolName, args) {
         case 'get_project_info':
             return this.getProjectInfo();
         case 'get_assets':
-            return this.getAssets(args.type);
+            return this.getAssets(args.type, args.path, args.limit, args.offset, args.countOnly);
         case 'get_asset_info':
             return this.getAssetInfo(args.uuid);
         case 'query_asset_uuid':
@@ -154,7 +173,7 @@ ProjectTools.prototype.getProjectInfo = function() {
     return Promise.resolve({ success: true, data: info });
 };
 
-ProjectTools.prototype.getAssets = function(type) {
+ProjectTools.prototype.getAssets = function(type, path, limit, offset, countOnly) {
     var typeMap = {
         'scene': 'scene',
         'prefab': 'prefab',
@@ -165,17 +184,47 @@ ProjectTools.prototype.getAssets = function(type) {
     };
 
     var queryType = typeMap[type] || null;
+    var maxLimit = 1000;
+    var defaultLimit = 100;
+
+    // Build pattern for path filtering (only if path is explicitly provided)
+    var pattern = path || null;
+
+    // Apply limits
+    limit = limit || defaultLimit;
+    if (limit > maxLimit) {
+        limit = maxLimit;
+    }
+    offset = offset || 0;
 
     return new Promise(function(resolve) {
-        Editor.assetdb.queryAssets(null, queryType, function(err, results) {
+        Editor.assetdb.queryAssets(pattern, queryType, function(err, results) {
             if (err) {
                 resolve({ success: false, error: err.message || String(err) });
                 return;
             }
 
+            var totalCount = results ? results.length : 0;
+
+            // If countOnly is true, return just the count
+            if (countOnly) {
+                resolve({
+                    success: true,
+                    data: {
+                        type: type || 'all',
+                        path: path || null,
+                        count: totalCount,
+                        assets: []
+                    }
+                });
+                return;
+            }
+
+            // Apply pagination
             var assets = [];
             if (results) {
-                for (var i = 0; i < results.length; i++) {
+                var endIndex = Math.min(offset + limit, results.length);
+                for (var i = offset; i < endIndex; i++) {
                     var asset = results[i];
                     assets.push({
                         name: asset.name,
@@ -185,9 +234,18 @@ ProjectTools.prototype.getAssets = function(type) {
                     });
                 }
             }
+
             resolve({
                 success: true,
-                data: { type: type || 'all', count: assets.length, assets: assets }
+                data: {
+                    type: type || 'all',
+                    path: path || null,
+                    count: totalCount,
+                    offset: offset,
+                    limit: limit,
+                    hasMore: (offset + limit) < totalCount,
+                    assets: assets
+                }
             });
         });
     });
@@ -299,13 +357,68 @@ ProjectTools.prototype.createAsset = function(url, content) {
 };
 
 ProjectTools.prototype.deleteAsset = function(url) {
+    var self = this;
     return new Promise(function(resolve) {
-        Editor.assetdb.delete(url, function(err) {
-            if (err) {
-                resolve({ success: false, error: err.message || String(err) });
-            } else {
-                resolve({ success: true, message: 'Asset deleted: ' + url });
+        // Convert db:// URL to file system path
+        var fsPath = null;
+
+        // Try different APIs for URL to path conversion
+        if (Editor.assetdb && Editor.assetdb._fspath) {
+            // Cocos Creator 2.x internal method
+            try {
+                fsPath = Editor.assetdb._fspath(url);
+            } catch (e) {
+                // Ignore
             }
+        }
+
+        if (!fsPath && Editor.urlToPath) {
+            try {
+                fsPath = Editor.urlToPath(url);
+            } catch (e) {
+                // Ignore
+            }
+        }
+
+        if (!fsPath) {
+            // Manual conversion: db://assets/path -> projectPath/assets/path
+            var projectPath = Editor.Project ? Editor.Project.path : (Editor.projectInfo ? Editor.projectInfo.path : null);
+            if (projectPath && url.indexOf('db://assets/') === 0) {
+                var relativePath = url.substring('db://assets/'.length);
+                fsPath = path.join(projectPath, 'assets', relativePath);
+            }
+        }
+
+        if (!fsPath) {
+            resolve({ success: false, error: 'Cannot convert URL to path: ' + url });
+            return;
+        }
+
+        // Try using fs.unlink directly (faster and more reliable)
+        fs.unlink(fsPath, function(err) {
+            if (err) {
+                // If file doesn't exist, consider it deleted
+                if (err.code === 'ENOENT') {
+                    resolve({ success: true, message: 'Asset already deleted: ' + url });
+                } else {
+                    resolve({ success: false, error: 'Delete failed: ' + err.message });
+                }
+                return;
+            }
+
+            // Refresh asset database after deletion (non-blocking)
+            var folder = 'db://assets';
+            if (Editor.assetdb && Editor.assetdb.refresh) {
+                try {
+                    Editor.assetdb.refresh(folder, function(refreshErr) {
+                        // Refresh complete, but don't wait for it
+                    });
+                } catch (e) {
+                    // Ignore refresh errors
+                }
+            }
+
+            resolve({ success: true, message: 'Asset deleted: ' + url });
         });
     });
 };

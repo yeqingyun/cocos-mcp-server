@@ -71,6 +71,24 @@ NodeTools.prototype.getTools = function() {
             }
         },
         {
+            name: 'find_node_by_name',
+            description: 'Find a single node by exact name. Returns the first matching node.',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    name: {
+                        type: 'string',
+                        description: 'Exact node name to search for'
+                    },
+                    searchRoot: {
+                        type: 'string',
+                        description: 'Optional: Parent node UUID or path to start search from (defaults to scene root)'
+                    }
+                },
+                required: ['name']
+            }
+        },
+        {
             name: 'get_all_nodes',
             description: 'Get all nodes in the scene with UUIDs',
             inputSchema: { type: 'object', properties: {} }
@@ -158,6 +176,8 @@ NodeTools.prototype.execute = function(toolName, args) {
             return this.getNodeInfo(args.uuidOrPath);
         case 'find_nodes':
             return this.findNodes(args.pattern, args.exactMatch);
+        case 'find_node_by_name':
+            return this.findNodeByName(args.name, args.searchRoot);
         case 'get_all_nodes':
             return this.getAllNodes();
         case 'set_node_property':
@@ -198,6 +218,10 @@ NodeTools.prototype.getNodeInfo = function(uuidOrPath) {
 
 NodeTools.prototype.findNodes = function(pattern, exactMatch) {
     return callSceneScript('find-nodes', pattern, !!exactMatch);
+};
+
+NodeTools.prototype.findNodeByName = function(name, searchRoot) {
+    return callSceneScript('find-node-by-name', name, searchRoot || null);
 };
 
 NodeTools.prototype.getAllNodes = function() {

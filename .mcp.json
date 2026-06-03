@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "apifox-new-mcp": {
+      "headers": {
+        "Authorization": "Bearer afxp_a41fe2e09QWBv398m7ZyXQLqTWijx1LuEWm7",
+        "X-Apifox-Api-Version": "2025-09-01"
+      },
+      "type": "http",
+      "url": "https://api.apifox.com/mcp"
+    },
+    "cocos-creator": {
+      "type": "http",
+      "url": "http://127.0.0.1:8585/mcp"
+    },
+    "lanhu": {
+      "type": "http",
+      "url": "http://192.168.1.200:8000/mcp?role=Developer&name=yeqingyun"
+    }
+  }
+}
