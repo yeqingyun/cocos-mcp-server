@@ -20,6 +20,10 @@ function MCPServer(port, tools) {
 
 MCPServer.prototype.start = function() {
     var self = this;
+    var maxPort = (this.port || 8585) + 100; // 最多尝试递增 100 个端口
+    var currentPort = this.port || 8585;
+    var serverStarted = false;
+
     return new Promise(function(resolve, reject) {
         if (self.httpServer) {
             console.log('[MCPServer 2x] Already running');
@@ -29,23 +33,61 @@ MCPServer.prototype.start = function() {
 
         self.setupTools();
 
-        self.httpServer = http.createServer(function(req, res) {
-            self.handleHttpRequest(req, res);
-        });
-
-        self.httpServer.listen(self.port, '127.0.0.1', function() {
-            console.log('[MCPServer 2x] HTTP server started on http://127.0.0.1:' + self.port);
-            console.log('[MCPServer 2x] MCP endpoint: http://127.0.0.1:' + self.port + '/mcp');
-            resolve();
-        });
-
-        self.httpServer.on('error', function(err) {
-            console.error('[MCPServer 2x] Failed to start:', err);
-            if (err.code === 'EADDRINUSE') {
-                console.error('[MCPServer 2x] Port ' + self.port + ' is already in use');
+        function tryStart(portAttempt) {
+            if (serverStarted) {
+                return;
             }
-            reject(err);
-        });
+
+            if (portAttempt > maxPort) {
+                reject(new Error('Failed to start: all ports from ' + self.port + ' to ' + maxPort + ' are in use'));
+                return;
+            }
+
+            // 关闭之前的服务器实例（如果有）
+            if (self.httpServer) {
+                try {
+                    self.httpServer.close();
+                    self.httpServer = null;
+                } catch (e) {
+                    // Ignore close errors
+                }
+            }
+
+            self.httpServer = http.createServer(function(req, res) {
+                self.handleHttpRequest(req, res);
+            });
+
+            self.httpServer.listen(portAttempt, '127.0.0.1', function() {
+                self.port = portAttempt; // 更新实际使用的端口
+                console.log('[MCPServer 2x] HTTP server started on http://127.0.0.1:' + portAttempt);
+                console.log('[MCPServer 2x] MCP endpoint: http://127.0.0.1:' + portAttempt + '/mcp');
+                if (portAttempt !== (self.originalPort || 8585)) {
+                    console.log('[MCPServer 2x] Note: Original port ' + (self.originalPort || 8585) + ' was in use, using port ' + portAttempt);
+                }
+                serverStarted = true;
+                resolve();
+            });
+
+            self.httpServer.on('error', function(err) {
+                if (err.code === 'EADDRINUSE' && portAttempt < maxPort) {
+                    console.log('[MCPServer 2x] Port ' + portAttempt + ' is in use, trying port ' + (portAttempt + 1) + '...');
+                    tryStart(portAttempt + 1);
+                } else if (err.code === 'EADDRINUSE') {
+                    console.error('[MCPServer 2x] All ports from ' + self.port + ' to ' + maxPort + ' are in use');
+                    reject(err);
+                } else {
+                    console.error('[MCPServer 2x] Failed to start:', err);
+                    reject(err);
+                }
+            });
+        }
+
+        // 保存原始端口
+        if (!self.originalPort) {
+            self.originalPort = self.port || 8585;
+        }
+
+        tryStart(currentPort);
     });
 };
 

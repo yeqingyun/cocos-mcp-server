@@ -60,32 +60,60 @@ export class MCPServer {
             return;
         }
 
-        try {
-            console.log(`[MCPServer] Starting HTTP server on port ${this.settings.port}...`);
-            this.httpServer = http.createServer(this.handleHttpRequest.bind(this));
+        const maxPort = this.settings.port + 100; // 最多尝试递增 100 个端口
+        let currentPort = this.settings.port;
+        let serverStarted = false;
 
-            await new Promise<void>((resolve, reject) => {
-                this.httpServer!.listen(this.settings.port, '127.0.0.1', () => {
-                    console.log(`[MCPServer] ✅ HTTP server started successfully on http://127.0.0.1:${this.settings.port}`);
-                    console.log(`[MCPServer] Health check: http://127.0.0.1:${this.settings.port}/health`);
-                    console.log(`[MCPServer] MCP endpoint: http://127.0.0.1:${this.settings.port}/mcp`);
-                    resolve();
+        while (currentPort <= maxPort && !serverStarted) {
+            try {
+                console.log(`[MCPServer] Starting HTTP server on port ${currentPort}...`);
+                this.httpServer = http.createServer(this.handleHttpRequest.bind(this));
+
+                await new Promise<void>((resolve, reject) => {
+                    this.httpServer!.listen(currentPort, '127.0.0.1', () => {
+                        // 更新 settings 中的端口为实际使用的端口
+                        this.settings.port = currentPort;
+                        console.log(`[MCPServer] ✅ HTTP server started successfully on http://127.0.0.1:${currentPort}`);
+                        console.log(`[MCPServer] Health check: http://127.0.0.1:${currentPort}/health`);
+                        console.log(`[MCPServer] MCP endpoint: http://127.0.0.1:${currentPort}/mcp`);
+                        if (currentPort !== this.settings.port) {
+                            console.log(`[MCPServer] Note: Original port ${this.settings.port} was in use, using port ${currentPort}`);
+                        }
+                        resolve();
+                    });
+                    this.httpServer!.on('error', (err: any) => {
+                        if (err.code === 'EADDRINUSE') {
+                            console.log(`[MCPServer] Port ${currentPort} is in use, trying port ${currentPort + 1}...`);
+                            reject(err);
+                        } else {
+                            console.error(`[MCPServer] ❌ Failed to start server:`, err);
+                            reject(err);
+                        }
+                    });
                 });
-                this.httpServer!.on('error', (err: any) => {
-                    console.error('[MCPServer] ❌ Failed to start server:', err);
-                    if (err.code === 'EADDRINUSE') {
-                        console.error(`[MCPServer] Port ${this.settings.port} is already in use. Please change the port in settings.`);
+
+                serverStarted = true;
+            } catch (error: any) {
+                if (error.code === 'EADDRINUSE' && currentPort < maxPort) {
+                    currentPort++;
+                    // 关闭失败的服务器以便重试
+                    if (this.httpServer) {
+                        this.httpServer.close();
+                        this.httpServer = null;
                     }
-                    reject(err);
-                });
-            });
-
-            this.setupTools();
-            console.log('[MCPServer] 🚀 MCP Server is ready for connections');
-        } catch (error) {
-            console.error('[MCPServer] ❌ Failed to start server:', error);
-            throw error;
+                } else {
+                    console.error('[MCPServer] ❌ Failed to start server after trying all ports:', error);
+                    throw error;
+                }
+            }
         }
+
+        if (!serverStarted) {
+            throw new Error(`Failed to start server: all ports from ${this.settings.port} to ${maxPort} are in use`);
+        }
+
+        this.setupTools();
+        console.log('[MCPServer] 🚀 MCP Server is ready for connections');
     }
 
     private setupTools(): void {
@@ -416,8 +444,9 @@ export class MCPServer {
         // Generate sample parameters based on schema
         const sampleParams = this.generateSampleParams(schema);
         const jsonString = JSON.stringify(sampleParams, null, 2);
-        
-        return `curl -X POST http://127.0.0.1:8585/api/${category}/${toolName} \\
+        const port = this.settings.port;
+
+        return `curl -X POST http://127.0.0.1:${port}/api/${category}/${toolName} \\
   -H "Content-Type: application/json" \\
   -d '${jsonString}'`;
     }
