@@ -72,6 +72,7 @@ module.exports = {
         var PrefabTools = safeRequire('./prefab-tools');
         var ProjectTools = safeRequire('./project-tools');
         var DebugTools = safeRequire('./debug-tools');
+        var ScreenshotTools = safeRequire('./screenshot-tools');
 
         loadSettings();
 
@@ -83,6 +84,7 @@ module.exports = {
         if (PrefabTools) tools.prefab = new PrefabTools.PrefabTools();
         if (ProjectTools) tools.project = new ProjectTools.ProjectTools();
         if (DebugTools) tools.debug = new DebugTools.DebugTools();
+        if (ScreenshotTools) tools.screenshot = new ScreenshotTools.ScreenshotTools();
 
         try {
             mcpServer = new MCPServer.MCPServer(settings.port, tools);

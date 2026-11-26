@@ -16,6 +16,7 @@ import { SceneViewTools } from './tools/scene-view-tools';
 import { ReferenceImageTools } from './tools/reference-image-tools';
 import { AssetAdvancedTools } from './tools/asset-advanced-tools';
 import { ValidationTools } from './tools/validation-tools';
+import { ScreenshotTools } from './tools/screenshot-tools';
 
 export class MCPServer {
     private settings: MCPServerSettings;
@@ -47,6 +48,7 @@ export class MCPServer {
             this.tools.referenceImage = new ReferenceImageTools();
             this.tools.assetAdvanced = new AssetAdvancedTools();
             this.tools.validation = new ValidationTools();
+            this.tools.screenshot = new ScreenshotTools();
             console.log('[MCPServer] Tools initialized successfully');
         } catch (error) {
             console.error('[MCPServer] Error initializing tools:', error);
@@ -284,7 +286,7 @@ export class MCPServer {
                 case 'tools/call':
                     const { name, arguments: args } = params;
                     const toolResult = await this.executeToolCall(name, args);
-                    result = { content: [{ type: 'text', text: JSON.stringify(toolResult) }] };
+                    result = this.buildToolCallContent(toolResult);
                     break;
                 case 'initialize':
                     // MCP initialization
@@ -318,6 +320,26 @@ export class MCPServer {
                 }
             };
         }
+    }
+
+    private buildToolCallContent(toolResult: any): any {
+        const content: any[] = [];
+
+        if (toolResult && toolResult.image && toolResult.image.data) {
+            // Emit an MCP `image` content block; drop the heavy base64 from the
+            // text summary so it isn't duplicated as a giant string.
+            const { image, ...rest } = toolResult;
+            content.push({ type: 'text', text: JSON.stringify(rest) });
+            content.push({
+                type: 'image',
+                data: image.data,
+                mimeType: image.mimeType || 'image/png'
+            });
+        } else {
+            content.push({ type: 'text', text: JSON.stringify(toolResult) });
+        }
+
+        return { content };
     }
 
     private fixCommonJsonIssues(jsonStr: string): string {

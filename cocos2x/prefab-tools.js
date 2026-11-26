@@ -40,6 +40,30 @@ PrefabTools.prototype.getTools = function() {
             }
         },
         {
+            name: 'open_prefab',
+            description: 'Open a prefab in the editor prefab edit mode (scene panel switches to editing this prefab, like double-clicking it in the assets panel)',
+            inputSchema: {
+                type: 'object',
+                properties: {
+                    prefabUuid: {
+                        type: 'string',
+                        description: 'Prefab asset UUID'
+                    },
+                    saveBeforeOpen: {
+                        type: 'boolean',
+                        description: 'Save the currently open scene/prefab before switching (default false)',
+                        default: false
+                    }
+                },
+                required: ['prefabUuid']
+            }
+        },
+        {
+            name: 'get_prefab_edit_state',
+            description: 'Get which prefab is currently open in the scene panel prefab edit mode',
+            inputSchema: { type: 'object', properties: {} }
+        },
+        {
             name: 'instantiate_prefab',
             description: 'Instantiate a prefab in the scene',
             inputSchema: {
@@ -192,6 +216,10 @@ PrefabTools.prototype.execute = function(toolName, args) {
             return this.getPrefabList(args.folder);
         case 'load_prefab':
             return this.loadPrefab(args.prefabUuid);
+        case 'open_prefab':
+            return this.openPrefab(args.prefabUuid, args.saveBeforeOpen);
+        case 'get_prefab_edit_state':
+            return this.getPrefabEditState();
         case 'instantiate_prefab':
             return this.instantiatePrefab(args);
         case 'create_prefab':
@@ -305,6 +333,130 @@ PrefabTools.prototype.getPrefabInfo = function(prefabUuid) {
 
 PrefabTools.prototype.loadPrefab = function(prefabUuid) {
     return callSceneScript('load-prefab', prefabUuid);
+};
+
+PrefabTools.prototype.openPrefab = function(prefabUuid, saveBeforeOpen) {
+    var self = this;
+    return new Promise(function(resolve) {
+        if (!prefabUuid) {
+            resolve({ success: false, error: 'prefabUuid is required' });
+            return;
+        }
+
+        // Validate the uuid exists and points to a prefab asset
+        // (same dual-path as getPrefabInfo: queryInfoByUuid, fallback assetInfoByUuid)
+        self.getPrefabInfo(prefabUuid).then(function(infoResult) {
+            if (!infoResult || !infoResult.success) {
+                resolve({ success: false, error: 'Prefab not found: ' + prefabUuid +
+                    (infoResult && infoResult.error ? ' (' + infoResult.error + ')' : '') });
+                return;
+            }
+            var info = {
+                url: infoResult.data.path,
+                name: infoResult.data.name
+            };
+            if (String(info.url || '').indexOf('.prefab') === -1) {
+                resolve({ success: false, error: 'Asset is not a prefab: ' + info.url });
+                return;
+            }
+
+            function sendEnter() {
+                // The real "double-click open" IPC: the scene panel handles the
+                // full transition itself (stash current state, load prefab).
+                try {
+                    Editor.Ipc.sendToPanel('scene', 'scene:enter-prefab-edit-mode', prefabUuid);
+                    return true;
+                } catch (ePanel) {
+                    try {
+                        Editor.Ipc.sendToScene('scene:enter-prefab-edit-mode', prefabUuid);
+                        return true;
+                    } catch (eScene) {
+                        resolve({
+                            success: false,
+                            error: 'Failed to send enter-prefab-edit-mode. sendToPanel: ' + ePanel.message +
+                                '; sendToScene: ' + eScene.message
+                        });
+                        return false;
+                    }
+                }
+            }
+
+            function poll(attempts) {
+                callSceneScript('query-prefab-edit-state', prefabUuid).then(function(state) {
+                    if (state && state.success && state.data && state.data.matchesTarget) {
+                        resolve({
+                            success: true,
+                            data: {
+                                uuid: prefabUuid,
+                                path: info.url,
+                                name: info.name,
+                                rootName: state.data.editedRootName,
+                                inPrefabEditMode: true,
+                                message: 'Prefab opened in edit mode (confirmed after ' + attempts + ' check' + (attempts > 1 ? 's' : '') + ')'
+                            }
+                        });
+                    } else if (attempts >= 15) {
+                        resolve({
+                            success: false,
+                            error: 'Prefab edit mode not confirmed after ' + attempts +
+                                ' checks. Last state: ' + JSON.stringify(state && state.data ? state.data : state)
+                        });
+                    } else {
+                        setTimeout(function() { poll(attempts + 1); }, 400);
+                    }
+                }).catch(function(e) {
+                    if (attempts >= 15) {
+                        resolve({ success: false, error: 'Failed to query edit state: ' + e.message });
+                    } else {
+                        setTimeout(function() { poll(attempts + 1); }, 400);
+                    }
+                });
+            }
+
+            // Optional: persist whatever is currently open before switching
+            var preStep;
+            if (saveBeforeOpen) {
+                preStep = new Promise(function(res) {
+                    try {
+                        Editor.Ipc.sendToPanel('scene', 'scene:stash-and-save');
+                    } catch (e) { /* ignore save errors, opening proceeds anyway */ }
+                    setTimeout(res, 1200);
+                });
+            } else {
+                preStep = Promise.resolve();
+            }
+
+            preStep.then(function() {
+                // Already in this prefab's edit mode? skip the reload entirely
+                return callSceneScript('query-prefab-edit-state', prefabUuid).then(function(state) {
+                    return !!(state && state.success && state.data && state.data.matchesTarget);
+                }).catch(function() { return false; });
+            }).then(function(alreadyOpen) {
+                if (alreadyOpen) {
+                    resolve({
+                        success: true,
+                        data: {
+                            uuid: prefabUuid,
+                            path: info.url,
+                            name: info.name,
+                            alreadyOpen: true,
+                            message: 'Prefab is already open in edit mode'
+                        }
+                    });
+                    return;
+                }
+
+                if (!sendEnter()) return;
+                setTimeout(function() { poll(1); }, 600);
+            }).catch(function(e) {
+                resolve({ success: false, error: e.message });
+            });
+        });
+    });
+};
+
+PrefabTools.prototype.getPrefabEditState = function() {
+    return callSceneScript('query-prefab-edit-state', null);
 };
 
 PrefabTools.prototype.createPrefab = function(args) {

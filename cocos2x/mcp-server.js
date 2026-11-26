@@ -124,6 +124,32 @@ MCPServer.prototype.executeToolCall = function(toolName, args) {
     return Promise.reject(new Error('Tool ' + toolName + ' not found'));
 };
 
+/**
+ * Build MCP content blocks for a tool result.
+ * When the result carries an inline image, emit an `image` content block and
+ * drop the heavy base64 from the text summary so it isn't duplicated.
+ */
+MCPServer.prototype.buildContent = function(toolResult) {
+    var content = [];
+    if (toolResult && toolResult.image && toolResult.image.data) {
+        var rest = {};
+        for (var k in toolResult) {
+            if (k !== 'image' && toolResult.hasOwnProperty(k)) {
+                rest[k] = toolResult[k];
+            }
+        }
+        content.push({ type: 'text', text: JSON.stringify(rest) });
+        content.push({
+            type: 'image',
+            data: toolResult.image.data,
+            mimeType: toolResult.image.mimeType || 'image/png'
+        });
+    } else {
+        content.push({ type: 'text', text: JSON.stringify(toolResult) });
+    }
+    return content;
+};
+
 MCPServer.prototype.stop = function() {
     if (this.httpServer) {
         this.httpServer.close();
@@ -218,7 +244,7 @@ MCPServer.prototype.handleMessage = function(message) {
                         resolve({
                             jsonrpc: '2.0',
                             id: id,
-                            result: { content: [{ type: 'text', text: JSON.stringify(toolResult) }] }
+                            result: { content: self.buildContent(toolResult) }
                         });
                     }).catch(function(err) {
                         resolve({

@@ -36,6 +36,68 @@ function addConsoleMsg(type, msg) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// cc.Graphics dead-instance guard (Cocos Creator 2.4.7 editor bug workaround)
+//
+// Bug: when a package reload triggers a scene soft-reload, runSceneImmediate
+// destroys the old scene and cc.Graphics.onDestroy sets `_impl = null`. The
+// scene panel's camera tool keeps a cached reference to the "Design
+// Resolution" gizmo Graphics and calls `graphics.lineWidth = x` inside
+// _drawDesignResolution, which throws "Cannot set property 'lineWidth' of
+// null", aborts the scene launch, and leaves a zombie scene process where
+// no prefab/scene can be opened afterwards.
+//
+// Guard: make every cc.Graphics prototype method/accessor a no-op when
+// `_impl == null` (component already destroyed). Live components behave
+// exactly as before. Runs at package load so it is active for the whole
+// editor session, including package-reload-triggered scene relaunches.
+// ---------------------------------------------------------------------------
+function installGraphicsDeadGuard() {
+    if (typeof cc === 'undefined' || !cc.Graphics || !cc.Graphics.prototype) return 'skipped';
+    if (cc.Graphics.prototype.__mcpGraphicsDeadGuard) return 'already-installed';
+
+    var proto = cc.Graphics.prototype;
+    var methods = ['clear', 'rect', 'roundRect', 'circle', 'ellipse', 'arc', 'moveTo',
+        'lineTo', 'bezierCurveTo', 'quadraticCurveTo', 'close', 'stroke', 'fill', 'fillRect'];
+    var accessors = ['lineWidth', 'lineJoin', 'lineCap', 'miterLimit', 'strokeColor', 'fillColor'];
+
+    methods.forEach(function (name) {
+        var orig = proto[name];
+        if (typeof orig !== 'function') return;
+        var wrapped = function () {
+            if (this._impl == null) return undefined; // destroyed: skip draw call
+            return orig.apply(this, arguments);
+        };
+        wrapped.__mcpDeadGuard = true;
+        try { proto[name] = wrapped; } catch (e) { /* ignore */ }
+    });
+
+    accessors.forEach(function (name) {
+        var d = Object.getOwnPropertyDescriptor(proto, name);
+        if (!d || !d.set) return;
+        try {
+            Object.defineProperty(proto, name, {
+                get: d.get,
+                set: function (v) {
+                    if (this._impl == null) return; // destroyed: skip instead of TypeError on null _impl
+                    d.set.call(this, v);
+                },
+                enumerable: d.enumerable,
+                configurable: true
+            });
+        } catch (e) { /* ignore */ }
+    });
+
+    proto.__mcpGraphicsDeadGuard = true;
+    return 'installed';
+}
+
+try {
+    installGraphicsDeadGuard();
+} catch (e) {
+    // Never let the guard break package boot
+}
+
 function findNodeByUuid(root, uuid) {
     if (!root) return null;
     if (root.uuid === uuid) return root;
@@ -170,6 +232,135 @@ function findSingleNodeByName(node, name) {
     }
 
     return null;
+}
+
+// Collect all Camera components under a node (recursive)
+function findCameras(node, list) {
+    if (!node) return;
+    if (node._components) {
+        for (var i = 0; i < node._components.length; i++) {
+            var comp = node._components[i];
+            if (comp instanceof cc.Camera || (comp.__classname__ === 'cc.Camera')) {
+                list.push(comp);
+            }
+        }
+    }
+    if (node.children) {
+        for (var j = 0; j < node.children.length; j++) {
+            findCameras(node.children[j], list);
+        }
+    }
+}
+
+// Union world-space bounding box of all nodes that have a content size.
+// Used to auto-frame a temporary camera when the scene has none (e.g. a prefab).
+function computeContentBounds(root) {
+    var m = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity, found: false };
+    function walk(n) {
+        if (!n) return;
+        try {
+            if (n.width && n.height && typeof n.getBoundingBoxToWorld === 'function') {
+                var b = n.getBoundingBoxToWorld();
+                if (b && b.width > 0 && b.height > 0) {
+                    if (b.x < m.minX) m.minX = b.x;
+                    if (b.y < m.minY) m.minY = b.y;
+                    if (b.x + b.width > m.maxX) m.maxX = b.x + b.width;
+                    if (b.y + b.height > m.maxY) m.maxY = b.y + b.height;
+                    m.found = true;
+                }
+            }
+        } catch (e) { /* ignore */ }
+        var ch = n.children || [];
+        for (var i = 0; i < ch.length; i++) walk(ch[i]);
+    }
+    walk(root);
+    return m.found ? m : null;
+}
+
+// Create a temporary orthographic camera framed on the given root node's content.
+// `rootNode` is either the scene (frame everything) or a specific node (frame its subtree).
+// Caller is responsible for destroying the returned camera's node afterwards.
+function createTempCameraFraming(rootNode, texW, texH) {
+    var b = computeContentBounds(rootNode);
+    var cx = 0, cy = 0, halfH = 360;
+    if (b) {
+        cx = (b.minX + b.maxX) / 2;
+        cy = (b.minY + b.maxY) / 2;
+        var wc = b.maxX - b.minX;
+        var hc = b.maxY - b.minY;
+        var aspect = texW / texH;
+        var pad = 1.08; // small margin
+        halfH = Math.max(hc / 2, (wc / 2) / aspect) * pad;
+        if (!(halfH > 0) || !isFinite(halfH)) halfH = 360;
+    } else {
+        // No renderable bounds: center on the root node's world position (or origin).
+        try {
+            if (rootNode && typeof rootNode.convertToWorldSpaceAR === 'function') {
+                var wp = rootNode.convertToWorldSpaceAR(cc.v2(0, 0));
+                if (wp) { cx = wp.x; cy = wp.y; }
+            }
+        } catch (e) { /* ignore */ }
+        var ds = (cc.view && cc.view.getDesignResolutionSize) ? cc.view.getDesignResolutionSize() : null;
+        if (ds && ds.height) halfH = ds.height / 2;
+    }
+
+    var scene = cc.director.getScene();
+    var camNode = new cc.Node('McpTmpCamera');
+    if (scene) scene.addChild(camNode);
+    camNode.x = cx;
+    camNode.y = cy;
+
+    var cam = camNode.addComponent(cc.Camera);
+    try { cam.ortho = true; } catch (e) { /* ignore */ }
+    try { cam.cullingMask = 0xffffffff; } catch (e) { /* ignore */ }
+    // Frame the content by setting the orthographic half-height (public + private).
+    try { cam.orthoHeight = halfH; } catch (e) { /* ignore */ }
+    try { cam._orthoHeight = halfH; } catch (e) { /* ignore */ }
+    return cam;
+}
+
+// Encode bytes to base64 without depending on Node Buffer (scene process may lack it).
+function toBase64Pure(bytes) {
+    try {
+        var g = (typeof globalThis !== 'undefined') ? globalThis : null;
+        if (g && g.Buffer) {
+            return g.Buffer.from(bytes).toString('base64');
+        }
+    } catch (e) { /* fall through to pure-JS path */ }
+
+    var chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    var len = bytes.length;
+    if (len === 0) return '';
+    var codes = new Array(Math.ceil(len / 3) * 4);
+    var outIdx = 0;
+    var i = 0;
+    var fullEnd = len - (len % 3);
+    while (i < fullEnd) {
+        var b0 = bytes[i++], b1 = bytes[i++], b2 = bytes[i++];
+        codes[outIdx++] = chars.charCodeAt(b0 >> 2);
+        codes[outIdx++] = chars.charCodeAt(((b0 & 3) << 4) | (b1 >> 4));
+        codes[outIdx++] = chars.charCodeAt(((b1 & 15) << 2) | (b2 >> 6));
+        codes[outIdx++] = chars.charCodeAt(b2 & 63);
+    }
+    var rem = len - i;
+    if (rem === 1) {
+        var b0 = bytes[i];
+        codes[outIdx++] = chars.charCodeAt(b0 >> 2);
+        codes[outIdx++] = chars.charCodeAt((b0 & 3) << 4);
+        codes[outIdx++] = 61; // '='
+        codes[outIdx++] = 61;
+    } else if (rem === 2) {
+        var b0 = bytes[i], b1 = bytes[i + 1];
+        codes[outIdx++] = chars.charCodeAt(b0 >> 2);
+        codes[outIdx++] = chars.charCodeAt(((b0 & 3) << 4) | (b1 >> 4));
+        codes[outIdx++] = chars.charCodeAt((b1 & 15) << 2);
+        codes[outIdx++] = 61;
+    }
+    var result = '';
+    for (var k = 0; k < outIdx; k += 8192) {
+        result += String.fromCharCode.apply(null, codes.slice(k, k + 8192));
+    }
+    return result;
 }
 
 module.exports = {
@@ -1408,6 +1599,46 @@ module.exports = {
         }
     },
 
+    // Query which prefab (if any) is currently open in prefab edit mode.
+    // Pass a prefabUuid to check against that specific prefab; pass null to
+    // just report the currently edited prefab. Prefab edit mode is detected
+    // by scanning scene children for a node whose _prefab.assetId matches.
+    'query-prefab-edit-state': function(event, prefabUuid) {
+        try {
+            var scene = cc.director.getScene();
+            if (!scene) {
+                event.reply(null, { success: false, error: 'No scene loaded' });
+                return;
+            }
+
+            var result = {
+                inPrefabEditMode: false,
+                editedPrefabUuid: null,
+                editedRootName: null,
+                matchesTarget: false
+            };
+
+            for (var i = 0; i < scene.children.length; i++) {
+                var child = scene.children[i];
+                if (!child || !child._prefab) continue;
+                var assetId = child._prefab.assetId || child._prefab._assetId ||
+                    (child._prefab.asset && child._prefab.asset._uuid) || null;
+                if (!assetId) continue;
+                result.inPrefabEditMode = true;
+                result.editedPrefabUuid = assetId;
+                result.editedRootName = child.name;
+                if (prefabUuid && assetId === prefabUuid) {
+                    result.matchesTarget = true;
+                }
+                break;
+            }
+
+            event.reply(null, { success: true, data: result });
+        } catch (e) {
+            event.reply(null, { success: false, error: e.message });
+        }
+    },
+
     'get-node-serialize-data': function(event, nodeUuid) {
         try {
             var scene = cc.director.getScene();
@@ -1573,6 +1804,130 @@ module.exports = {
                 logs: logs
             }
         });
+    },
+
+    // === Screenshot tools ===
+
+    'capture-scene': function(event, width, height, cameraUuid, targetNodeUuid) {
+        try {
+            width = Math.max(1, Math.min(2048, Math.floor(Number(width) || 512)));
+            height = Math.max(1, Math.min(2048, Math.floor(Number(height) || 512)));
+
+            var scene = cc.director.getScene();
+            if (!scene) {
+                event.reply(null, { success: false, error: 'No scene loaded' });
+                return;
+            }
+            if (typeof cc.RenderTexture !== 'function') {
+                event.reply(null, { success: false, error: 'cc.RenderTexture is not available' });
+                return;
+            }
+
+            // Camera selection priority:
+            //   1. cameraUuid          -> use that specific existing camera
+            //   2. targetNodeUuid      -> temp camera framed on that node's subtree
+            //   3. any existing camera -> use the first one
+            //   4. otherwise           -> temp camera framed on the whole scene
+            var cameras = [];
+            findCameras(scene, cameras);
+            var cameraComp = null;
+            var createdTemp = false;
+            var framedNodeUuid = null;
+
+            if (cameraUuid) {
+                for (var c = 0; c < cameras.length; c++) {
+                    if (cameras[c].node && cameras[c].node.uuid === cameraUuid) {
+                        cameraComp = cameras[c];
+                        break;
+                    }
+                }
+                if (!cameraComp) {
+                    event.reply(null, { success: false, error: 'Camera with uuid ' + cameraUuid + ' not found in scene' });
+                    return;
+                }
+            } else if (targetNodeUuid) {
+                var targetNode = findNodeByUuid(scene, targetNodeUuid);
+                if (!targetNode && typeof cc.find === 'function') {
+                    try { targetNode = cc.find(targetNodeUuid); } catch (e) { targetNode = null; }
+                }
+                if (!targetNode) {
+                    event.reply(null, { success: false, error: 'Target node not found: ' + targetNodeUuid });
+                    return;
+                }
+                cameraComp = createTempCameraFraming(targetNode, width, height);
+                createdTemp = !!cameraComp;
+                framedNodeUuid = targetNode.uuid || targetNodeUuid;
+                if (!cameraComp) {
+                    event.reply(null, { success: false, error: 'Failed to create a camera framed on target node' });
+                    return;
+                }
+            } else if (cameras.length > 0) {
+                cameraComp = cameras[0];
+            } else {
+                cameraComp = createTempCameraFraming(scene, width, height);
+                createdTemp = !!cameraComp;
+                if (!cameraComp) {
+                    event.reply(null, {
+                        success: false,
+                        error: 'No Camera in scene and content could not be auto-framed (empty scene?). Add a Camera or pass cameraUuid/targetNodeUuid.'
+                    });
+                    return;
+                }
+            }
+
+            // Snapshot camera identity before capture (temp camera is destroyed in finally).
+            var camNodeRef = cameraComp.node;
+            var cameraNameOut = camNodeRef ? camNodeRef.name : 'Camera';
+            var cameraUuidOut = camNodeRef ? camNodeRef.uuid : (cameraUuid || null);
+
+            var tex = new cc.RenderTexture();
+            try {
+                tex.initWithSize(width, height);
+            } catch (e) {
+                tex.initWithSize(width, height, cc.Texture2D.PixelFormat.RGBA8888);
+            }
+
+            var oldTarget = cameraComp.targetTexture;
+            var pixels = null;
+            try {
+                cameraComp.targetTexture = tex;
+                // Force a synchronous render of this camera into the texture.
+                if (typeof cameraComp.render === 'function') {
+                    cameraComp.render();
+                } else if (cameraComp._camera && typeof cameraComp._camera.render === 'function') {
+                    cameraComp._camera.render();
+                }
+                if (typeof tex.readPixels === 'function') {
+                    pixels = tex.readPixels();
+                }
+            } finally {
+                cameraComp.targetTexture = oldTarget;
+                try { tex.destroy && tex.destroy(); } catch (e) { /* ignore */ }
+                // Remove the auto-created temporary camera so the scene is untouched.
+                if (createdTemp && cameraComp.node) {
+                    try { cameraComp.node.removeFromParent(true); } catch (e) { /* ignore */ }
+                    try { cameraComp.node.destroy(); } catch (e) { /* ignore */ }
+                }
+            }
+
+            if (!pixels) {
+                event.reply(null, { success: false, error: 'Failed to read pixels from render texture' });
+                return;
+            }
+
+            event.reply(null, {
+                success: true,
+                width: width,
+                height: height,
+                dataBase64: toBase64Pure(pixels),
+                cameraUuid: cameraUuidOut,
+                cameraName: cameraNameOut,
+                autoFramed: createdTemp,
+                framedNodeUuid: framedNodeUuid
+            });
+        } catch (e) {
+            event.reply(null, { success: false, error: e.message || String(e) });
+        }
     }
 };
 

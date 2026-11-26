@@ -18,6 +18,11 @@ export interface ToolDefinition {
     inputSchema: any;
 }
 
+export interface ToolImageContent {
+    data: string;      // base64-encoded image bytes (no data: prefix)
+    mimeType: string;  // e.g. 'image/png'
+}
+
 export interface ToolResponse {
     success: boolean;
     data?: any;
@@ -27,6 +32,8 @@ export interface ToolResponse {
     warning?: string;
     verificationData?: any;
     updatedProperties?: string[];
+    /** When set, the MCP server returns an `image` content block alongside the text summary. */
+    image?: ToolImageContent;
 }
 
 export interface NodeInfo {

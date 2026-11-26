@@ -1,6 +1,71 @@
 import { join } from 'path';
 module.paths.push(join(Editor.App.path, 'node_modules'));
 
+/**
+ * Encode bytes to base64 without depending on Node `Buffer`.
+ * The editor scene process may expose Buffer (Electron) — use it when available,
+ * otherwise fall back to a pure-JS encoder.
+ */
+function toBase64Pure(bytes: any): string {
+    try {
+        const g: any = globalThis as any;
+        if (g && g.Buffer) {
+            return g.Buffer.from(bytes).toString('base64');
+        }
+    } catch (e) { /* fall through to pure-JS path */ }
+
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    const len: number = bytes.length;
+    if (len === 0) { return ''; }
+    const codes: number[] = new Array(Math.ceil(len / 3) * 4);
+    let outIdx = 0;
+    let i = 0;
+    const fullEnd = len - (len % 3);
+    while (i < fullEnd) {
+        const b0 = bytes[i++], b1 = bytes[i++], b2 = bytes[i++];
+        codes[outIdx++] = chars.charCodeAt(b0 >> 2);
+        codes[outIdx++] = chars.charCodeAt(((b0 & 3) << 4) | (b1 >> 4));
+        codes[outIdx++] = chars.charCodeAt(((b1 & 15) << 2) | (b2 >> 6));
+        codes[outIdx++] = chars.charCodeAt(b2 & 63);
+    }
+    const rem = len - i;
+    if (rem === 1) {
+        const b0 = bytes[i];
+        codes[outIdx++] = chars.charCodeAt(b0 >> 2);
+        codes[outIdx++] = chars.charCodeAt((b0 & 3) << 4);
+        codes[outIdx++] = 61; // '='
+        codes[outIdx++] = 61;
+    } else if (rem === 2) {
+        const b0 = bytes[i], b1 = bytes[i + 1];
+        codes[outIdx++] = chars.charCodeAt(b0 >> 2);
+        codes[outIdx++] = chars.charCodeAt(((b0 & 3) << 4) | (b1 >> 4));
+        codes[outIdx++] = chars.charCodeAt((b1 & 15) << 2);
+        codes[outIdx++] = 61;
+    }
+    let result = '';
+    for (let k = 0; k < outIdx; k += 8192) {
+        result += (String.fromCharCode as any).apply(null, codes.slice(k, k + 8192));
+    }
+    return result;
+}
+
+/**
+ * Get the Cocos engine reference:
+ *  - Cocos Creator 2.x exposes `cc` as a global on globalThis.
+ *  - Cocos Creator 3.x exposes it via require('cc').
+ */
+function getEngine(): any {
+    try {
+        const g: any = globalThis as any;
+        if (g && g.cc) { return g.cc; }
+    } catch (e) { /* fall through */ }
+    try {
+        return require('cc');
+    } catch (e) {
+        return null;
+    }
+}
+
 export const methods: { [key: string]: (...any: any) => any } = {
     /**
      * Create a new scene
@@ -430,6 +495,123 @@ export const methods: { [key: string]: (...any: any) => any } = {
             return { success: true, message: `Component property '${property}' updated successfully` };
         } catch (error: any) {
             return { success: false, error: error.message };
+        }
+    },
+
+    /**
+     * Capture the current scene from a Camera component.
+     * Renders the camera into a RenderTexture, reads the pixels and returns
+     * them as base64-encoded raw RGBA (bottom-up, GL convention).
+     * The main process flips vertically and encodes to PNG.
+     *
+     * Primary path: Cocos Creator 2.x (`RenderTexture.initWithSize` + `camera.render()`).
+     * Fallback: Cocos Creator 3.x (`RenderTexture.reset` + `director.root.pipeline.render`).
+     */
+    captureScene(width: number, height: number, cameraUuid?: string) {
+        try {
+            width = Math.max(1, Math.min(2048, Math.floor(Number(width) || 512)));
+            height = Math.max(1, Math.min(2048, Math.floor(Number(height) || 512)));
+
+            const engine: any = getEngine();
+            if (!engine) {
+                return { success: false, error: 'cc engine is not available in the scene process' };
+            }
+            const { director, Camera, RenderTexture } = engine;
+            const scene = director.getScene();
+            if (!scene) {
+                return { success: false, error: 'No active scene' };
+            }
+
+            // Find a Camera component: by node uuid, else the first one in the scene.
+            const cameras = scene.getComponentsInChildren(Camera);
+            let cameraComp: any = null;
+            if (cameraUuid) {
+                cameraComp = cameras.find((c: any) => c.node && c.node.uuid === cameraUuid);
+            }
+            if (!cameraComp && cameras && cameras.length > 0) {
+                cameraComp = cameras[0];
+            }
+            if (!cameraComp) {
+                return {
+                    success: false,
+                    error: 'No Camera component found in scene. Add a Camera node or pass a valid cameraUuid.'
+                };
+            }
+
+            const renderTex: any = new RenderTexture();
+            const oldTarget = cameraComp.targetTexture;
+            let pixels: Uint8Array | null = null;
+
+            try {
+                if (typeof renderTex.initWithSize === 'function') {
+                    // -------- Cocos Creator 2.x path --------
+                    try {
+                        renderTex.initWithSize(width, height);
+                    } catch (e) {
+                        // Some 2.x versions require an explicit pixel format.
+                        renderTex.initWithSize(width, height, engine.Texture2D.PixelFormat.RGBA8888);
+                    }
+                    cameraComp.targetTexture = renderTex;
+                    cameraComp.render();
+                    if (typeof renderTex.readPixels === 'function') {
+                        pixels = renderTex.readPixels();
+                    }
+                } else {
+                    // -------- Cocos Creator 3.x fallback --------
+                    if (typeof renderTex.reset === 'function') {
+                        renderTex.reset({ width, height });
+                    } else if (typeof renderTex.initialize === 'function') {
+                        renderTex.initialize({ width, height });
+                    } else {
+                        return { success: false, error: 'RenderTexture has no initWithSize/reset/initialize method' };
+                    }
+                    cameraComp.targetTexture = renderTex;
+                    const internalCam = cameraComp.camera || cameraComp._camera;
+                    if (!internalCam || !internalCam.view) {
+                        throw new Error('Cannot access camera render view (camera.camera.view) — Cocos version may be incompatible.');
+                    }
+                    director.root.pipeline.render([internalCam.view]);
+                    if (typeof renderTex.readPixels === 'function') {
+                        try { pixels = renderTex.readPixels(); } catch (e) { pixels = null; }
+                    }
+                    if (!pixels && renderTex.window && renderTex.window.framebuffer) {
+                        const buf = new ArrayBuffer(width * height * 4);
+                        let region: any;
+                        try {
+                            region = new engine.gfx.BufferTextureCopy();
+                        } catch (e) {
+                            region = { texOffset: { x: 0, y: 0 }, texExtent: { width, height } };
+                        }
+                        region.texOffset = region.texOffset || { x: 0, y: 0 };
+                        region.texOffset.x = 0;
+                        region.texOffset.y = 0;
+                        region.texExtent = region.texExtent || {};
+                        region.texExtent.width = width;
+                        region.texExtent.height = height;
+                        director.root.device.copyFramebufferToBuffer(renderTex.window.framebuffer, buf, [region]);
+                        pixels = new Uint8Array(buf);
+                    }
+                }
+            } finally {
+                // Always restore so the editor's normal rendering is not affected.
+                cameraComp.targetTexture = oldTarget;
+                try { renderTex.destroy && renderTex.destroy(); } catch (e) { /* ignore */ }
+            }
+
+            if (!pixels) {
+                return { success: false, error: 'Failed to read pixels from render texture' };
+            }
+
+            return {
+                success: true,
+                width,
+                height,
+                dataBase64: toBase64Pure(pixels),
+                cameraUuid: cameraComp.node ? cameraComp.node.uuid : cameraUuid,
+                cameraName: cameraComp.node ? cameraComp.node.name : 'Camera'
+            };
+        } catch (error: any) {
+            return { success: false, error: error.message || String(error) };
         }
     }
 };

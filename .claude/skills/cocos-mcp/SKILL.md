@@ -18,7 +18,8 @@ license: Proprietary.
 | Prefab | 10 | ✅ | 预制体管理（加载、实例化、创建、更新） |
 | Project | 7 | ✅ | 项目管理（资源查询、创建、删除） |
 | Debug | 4 | ✅ | 调试工具（脚本执行、日志查看） |
-| **总计** | **60** | **✅ 100%** | **测试覆盖率100%** |
+| Screenshot | 1 | ✅ | 场景截图（Camera 渲染为 PNG 内联返回） |
+| **总计** | **61** | **✅ 100%** | **测试覆盖率100%** |
 
 ## 基础调用方式
 
@@ -97,6 +98,20 @@ scene_save_scene  {}
 
 3. **已知问题**：
    - `scene_open_scene` 后编辑器标题栏可能不更新（场景内容正常加载）
+
+4. **⚠️ `scene_save_scene` 会清空 sp.Skeleton 的 skeletonData（实测 Bug）**：
+   - 通过 MCP 保存场景时，`sp.Skeleton` 组件的 `_N$skeletonData` 字段会被重置为 `{}`（即绑定丢失）。
+   - **cc.Sprite 的 `_spriteFrame` 不受影响，能正常持久化**；只有 spine 数据有这个问题。
+   - 结论：**spine 数据不要指望通过 MCP 流程静态绑定并保存**，应改用脚本运行时加载（见第十二章避坑指南）。
+
+5. **⚠️ 避免反复 close → 改 .fire 文件 → open → save 的循环**：
+   - MCP 的 `scene_save_scene` 序列化路径与编辑器原生保存不完全一致，execute_script 创建的运行时节点在**首次保存**能持久化，但在多次 close/open/save 往复后，**有可能把整个场景文件截断**（实测曾把含 32 节点的场景覆盖成只剩 Canvas + Camera）。
+   - **正确做法**：execute_script 建完树 + 设完属性后，**只 save 一次**，之后尽量在编辑器 UI 里手动保存，不要再做 close/open 循环。
+
+6. **节点 UUID 在 close/open/save 后会变化**：
+   - 每次重新打开或保存场景，节点的运行时 UUID 可能重新生成。
+   - **缓存过的 UUID 在场景重载后必然失效**（报 "Node not found"）。
+   - 正确做法：每次场景重载后，用 `node_find_node_by_name` 或 `debug_execute_script` + `cc.find(...).uuid` **重新拉取 UUID** 再操作。
 
 ---
 
@@ -288,6 +303,19 @@ component_set_component_property  {"nodeUuid": "<UUID>", "componentType": "cc.La
    - `scriptName` 不含扩展名（如 "PlayerController" 对应 PlayerController.js）
    - 如果项目中有同名脚本，建议使用 `scriptPath` 明确指定
 
+5. **⚠️ cc.Label 不能和 cc.Sprite 共存于同一节点（渲染组件冲突）**：
+   - 报错：`Can't add component 'cc.Label' to xxx because it conflicts with the existing 'cc.Sprite' derived component.`
+   - 一个节点只能挂**一个渲染类组件**（Sprite / Label / RichText / Graphics 等互斥）。
+   - **正确做法**：给按钮/图片节点加文字，要**新建一个子节点**挂 Label，不要直接往带 Sprite 的节点上 addComponent(cc.Label)。
+   - 例：`btn_buy`（已有 cc.Sprite + cc.Button）→ 新建子节点 `txt_buy` 挂 cc.Label。
+
+6. **⚠️ sp.Skeleton 的 skeletonData 通过 MCP 绑定不可靠**：
+   - 属性名是 `_N$skeletonData`（**不是** `_skeletonData`，也不是公开的 `skeletonData`）。
+   - 用 `component_set_component_property` 设 `_N$skeletonData` + `{"__uuid__":"..."}`：**返回 success 但保存后变 `{}`**（不持久化）。
+   - 直接改 .fire 文件注入 uuid：运行时能加载（HAS_DATA），但编辑器属性系统不认 → **Inspector 打不开**，报 `this.skeletonData.getSkinsEnum is not a function` / `getAnimsEnum is not a function`。
+   - 用公开属性 `skeletonData` 设值：setter 调 `getAnimsEnum` 直接抛异常，**会把组件弄成损坏态**，之后 Inspector 一直崩。
+   - **正确做法**：spine 数据留空，在脚本里运行时 `res.load` 加载并赋值；或重启编辑器后用 Inspector 手动拖入。
+
 ---
 
 ## 四、预制体操作 (prefab)
@@ -363,7 +391,22 @@ prefab_duplicate_prefab  {"sourcePrefabUuid": "<SOURCE_UUID>", "targetPrefabPath
    - **修改**: 修改实例 → prefab_update_prefab
    - **恢复**: prefab_revert_prefab
 
-2. **部分支持的功能**：
+2. **✅ 新建预制体 = 新建一个场景当工作区（关键认知）**：
+   - MCP 没有独立的预制体编辑模式，**编辑预制体的内容必须在场景里进行**。所以「新建预制体」的实际流程是：`scene_create_scene` 建一个空场景 → 在里面搭节点树 → `prefab_create_prefab` 把树存成 `.prefab`。
+   - **预制体内容不需要、也不应保留 Canvas 和 Main Camera 节点**。这两个是场景级基础设施，预制体只装真正的 UI 子树（如弹窗根节点、列表项根节点）。
+   - 推荐流程：
+     ```
+     1. scene_create_scene（建临时场景）→ scene_close_scene → scene_open_scene
+     2. 直接建预制体根节点（例如叫 MyDialog），不要建 Canvas/Main Camera
+        - 可用 debug_execute_script：var root = new cc.Node('MyDialog'); root.parent = cc.director.getScene();
+     3. 在 root 下搭完整 UI 子树 + 挂组件
+     4. 设 spriteFrame / Label 等属性
+     5. prefab_create_prefab({"nodeUuid": <root的uuid>, "prefabPath": "db://assets/xxx/MyDialog.prefab"})
+     6. scene_save_scene 保存一次
+     ```
+   - 这样产出的 `.prefab` 文件干净，实例化时由调用方挂到任意 Canvas 下，不会带多余的 Canvas/Main Camera。
+
+3. **部分支持的功能**：
    - `prefab_revert_prefab` 在某些 Cocos Creator 版本可能不支持
 
 ---
@@ -504,7 +547,14 @@ debug_get_console_logs  {"limit": 30}
    - ✅ 直接使用表达式：`cc.director.getScene().name`
    - ✅ 使用变量声明：`var scene = cc.director.getScene(); scene.name`
 
-2. **get_project_logs**：
+2. **✅ execute_script 是批量建树的推荐方式（实测高效可靠）**：
+   - 用 `new cc.Node()` + `node.parent = ...` + `addComponent(cc.Sprite)` 一次性建整棵节点树，比逐个 `node_create_node` 快几十倍。
+   - **创建的节点能持久化**：建完后调一次 `scene_save_scene`，节点会写入 .fire 文件（实测 32 节点 + 组件全部保存成功）。
+   - `addComponent(cc.Label)` 后**立即**给 `.string` 赋值即可；脚本最后用一行表达式返回统计结果（如 `'nodes=' + root.childrenCount`）。
+   - **注意**：execute_script 是在**运行时场景上下文**执行，无法访问 `Editor` 主进程 API；要设资源引用（spriteFrame）建议用 `component_set_component_property` 走编辑器属性管道，序列化更可靠。
+   - **注意**：execute_script 内 `addComponent(cc.Label)` 到已有 cc.Sprite 的节点会返回 `null`（渲染组件冲突，见组件章第 5 条），脚本会中止 —— 建子节点挂 Label。
+
+3. **get_project_logs**：
    - 需要项目有 `temp/logs/project.log` 文件
    - 如果文件不存在，返回错误信息
    - 这是预期行为，不是所有项目都有日志文件
@@ -754,6 +804,13 @@ project_get_assets  {"path": "db://assets/res/hall/**/*.png"}
 project_get_assets  {"path": "db://assets/res/hall/common/match_dialog/texture/**/*.json"}
 ```
 
+### Q: sp.Skeleton 节点的属性编辑器（Inspector）打不开，报 `this.skeletonData.getSkinsEnum is not a function`？
+
+**A:** 这是 spine 数据绑定异常导致的，根因和解法见 **第十二章**。简要：
+- 该组件的 skeletonData 处于损坏/未正确解析态（常见于用 MCP 设过 spine 数据、或直接改过 .fire 注入 uuid）。
+- **应急修复**：`component_remove_component` 移除该 sp.Skeleton → `component_add_component` 重新加一个空 sp.Skeleton → Inspector 即可打开。
+- **根治**：spine 数据不要用 MCP 静态绑定，改为脚本运行时 `res.load` 加载；或重启编辑器后用 Inspector 手动拖入 spine 资源。
+
 ---
 
 ## 十、性能指标
@@ -780,7 +837,98 @@ bash build-uat2.sh
 
 ---
 
-**最后更新**: 2024-06-04
+## 十二、实测最佳实践与避坑（实战总结）
+
+> 本节由真实搭建测试场景（testStore.fire，含 32 节点 / 9 张图片 / spine / 自定义脚本）验证得出，**优先级最高，遇到对应场景务必遵守**。
+
+### ✅ 正确做法 vs ❌ 避免做法
+
+| 场景 | ✅ 正确做法 | ❌ 避免做法（会踩坑） |
+|------|------------|----------------------|
+| **批量建节点树** | `debug_execute_script` 用 `new cc.Node()` + `addComponent()` 一次性建完，再 `scene_save_scene` **保存一次** | 逐个调 `node_create_node`（几十次调用，极慢） |
+| **设图片 spriteFrame** | `component_set_component_property` 设 `_spriteFrame` = `{"__uuid__":"..."}`，可正常持久化 | 用 execute_script 的 `cc.loader.load` 在编辑器里加载（会报 download failed） |
+| **spine skeletonData** | 组件留空，**脚本运行时** `res.load` 加载并赋值；或重启编辑器后 Inspector 手动拖 | 用 MCP 设 `_N$skeletonData`（保存后丢失）；直接改 .fire 注入 uuid（Inspector 崩 `getSkinsEnum is not a function`）；设公开 `skeletonData`（损坏组件） |
+| **给按钮加文字** | 新建**子节点**挂 cc.Label（如 `btn_buy/txt_buy`） | 往带 cc.Sprite 的节点 `addComponent(cc.Label)`（渲染组件冲突，返回 null 中止脚本） |
+| **保存场景** | 建树+设属性后 `scene_save_scene` **一次**；之后在编辑器 UI 手动保存 | 反复 close → 改 .fire → open → save 循环（**可能截断整个场景文件**，丢失全部节点） |
+| **节点 UUID** | 每次场景 close/open/save 后，用 `node_find_node_by_name` 或 execute_script 重新取 UUID | 缓存 UUID 跨场景重载使用（必然 "Node not found"） |
+| **资源 UUID 获取** | 读 .png.meta 里 `subMetas.<name>.uuid`（sprite-frame 子资源 uuid），批量可用 `grep -B1 '"importer": "sprite-frame"'` | 用 `project_query_asset_uuid`（返回的是 texture 主 uuid，设给 `_spriteFrame` 不生效） |
+| **新建预制体** | **新建一个临时场景当工作区**，里面只搭 UI 子树（**不含 Canvas / Main Camera**），再 `prefab_create_prefab` 存成 .prefab | 在带 Canvas/Main Camera 的场景里直接 `prefab_create_prefab`（会把场景级基础设施也打进预制体，实例化时多一层/冲突） |
+
+### 关键原理
+
+1. **sprite-frame vs texture 的 uuid**：Cocos 2.x 的 `.png` 导出后，.meta 里有**两个** uuid —— 顶层 texture uuid 和 `subMetas` 里的 sprite-frame uuid。设 `_spriteFrame` 必须用 **sprite-frame 子资源 uuid**，不是 texture 主 uuid。
+2. **spine 序列化字段名**：`sp.Skeleton` 的可序列化字段是 `_N$skeletonData`（带 `_N$` 前缀），不是 `_skeletonData`，也不是公开 getter `skeletonData`。但即便用对了字段名，MCP 保存路径仍会清空它 —— 这是 MCP 与编辑器 spine 序列化的兼容缺陷。
+3. **execute_script 节点持久化条件**：运行时 `new cc.Node()` 创建的节点，在**首次** `scene_save_scene` 时会被序列化进 .fire；但编辑器对这类"非编辑器原生创建"节点的所有权是脆弱的，经过 close/open 后再 save 有丢失风险。
+4. **Inspector 崩溃根因**：sp.Skeleton 的 Inspector 会调 `skeletonData.getSkinsEnum()/getAnimsEnum()` 画下拉框；当 skeletonData 不是带这些编辑器方法的 `sp.SkeletonData` 实例时（uuid 注入未走编辑器属性管道、或 setter 中途崩溃留下损坏态），Inspector 直接打不开。
+
+### 推荐的"搭建一个含图片+spine+脚本的场景"完整流程
+
+```
+1. scene_create_scene → scene_close_scene → scene_open_scene（等 2~5s）
+2. debug_execute_script：建 Canvas + 整棵节点树（new cc.Node + addComponent + 设尺寸/位置/Label.string），结尾返回统计
+3. scene_save_scene  保存一次，确认 .fire 文件 node 数量正确（grep cc.Node 计数）
+4. execute_script 取所有需设图片的节点 uuid（cc.find(...).uuid → JSON.stringify）
+5. 批量 component_set_component_property 设 _spriteFrame（用 sprite-frame 子资源 uuid）
+6. component_attach_script 挂自定义脚本组件
+7. scene_save_scene  保存第二次（sprite 引用会持久化）
+8. spine 数据：不静态绑定，留给脚本运行时 res.load 加载
+9. 验证：scene_get_scene_hierarchy 确认树完整；component_get_component_info 确认各组件 Inspector 可打开
+```
+
+> ⚠️ 全程**不要** close/open 反复横跳；**不要**手改 .fire 后再用 MCP save。
+
+---
+
+## 十三、场景截图 (screenshot)
+
+### 可用工具
+
+| 工具 | 描述 | 参数 |
+|------|------|------|
+| `screenshot_capture_scene` | 用场景里的 Camera 把当前场景渲染成 PNG 截图返回 | `width`, `height`, `cameraUuid`(可选), `savePath`(可选) |
+
+### 说明
+
+- 把相机渲染到 RenderTexture，读像素后编码为 PNG。
+- **以 MCP `image` 内容块内联返回**，调用方（如 Claude）可直接看到画面；同时可选 `savePath` 存盘。
+- **捕获的是"游戏相机视角"**（Camera 组件所见），不是编辑器视口的 gizmo / 网格 / 选中高亮。
+- **无需场景里有 Camera**：没传 `cameraUuid` 且场景无相机时（如预制体），自动建临时正交相机取景，截完销毁，不污染场景。分辨率默认 512×512，范围 1–2048。
+- `savePath` 支持绝对路径或 `db://` 路径（如 `db://assets/screenshot.png`，落到 assets 目录后会被资源库自动导入为贴图）。
+
+**取景规则（优先级）：**
+1. 传 `cameraUuid` → 用指定相机。
+2. 传 `targetNodeUuid` → 自动建临时相机，**只框该节点子树**（排除兄弟/父级）。
+3. 都不传且场景有相机 → 用第一个相机。
+4. 都不传且无相机 → 自动建临时相机**框整个场景**。
+
+### 使用示例
+
+```bash
+# 默认 512x512 截图，内联返回
+screenshot_capture_scene  {}
+
+# 指定分辨率 + 相机
+screenshot_capture_scene  {"width": 1024, "height": 576, "cameraUuid": "<MAIN_CAMERA_UUID>"}
+
+# 只截某节点子树（紧框该节点，自动建临时相机）
+screenshot_capture_scene  {"targetNodeUuid": "<NODE_UUID>", "width": 300, "height": 300}
+
+# 截图并存盘
+screenshot_capture_scene  {"savePath": "db://assets/snapshots/scene-001.png"}
+```
+
+### ⚠️ 注意事项
+
+1. **无需 Camera**：没相机时（如预制体）会自动建临时正交相机取景；想换角度需传 `cameraUuid` 指定相机或先改相机。
+2. **只截某子树**：传 `targetNodeUuid` 可紧框指定节点（排除兄弟/父级），适合给单个 UI 元素出图。
+3. **视角≠编辑器视口**：截到的是相机取景，不含编辑器 gizmo/网格/选中高亮。
+4. **临时改动**：自动建的临时相机会在截完后销毁，不污染场景；指定相机时仅临时改 `targetTexture` 并恢复。
+5. **数据量**：大分辨率（如 2048×2048）返回的 base64 较大、较慢，日常用 512–1024 即可。
+6. **版本**：该工具面向 **Cocos Creator 2.4.7**（`cc.RenderTexture.initWithSize` + `camera.render()` + `readPixels()`，引擎通过全局 `cc` 访问）；同时保留 3.x 的 `reset`/`pipeline.render` 作为自动回退。
+
+---
+
+**最后更新**: 2026-07-08
 **测试覆盖率**: 100% (57/57 可测试工具)
 **Cocos Creator 版本**: 2.4.7+
 **服务器端口**: 8585
